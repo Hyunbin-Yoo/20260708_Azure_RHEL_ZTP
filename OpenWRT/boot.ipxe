@@ -1,0 +1,41 @@
+#!ipxe
+
+echo =========================================
+echo Initiating Zero-Touch Provisioning...
+echo =========================================
+
+prompt --key 0x02 --timeout 3000 Press Ctrl-B for the iPXE command line... || goto ztp_boot
+
+:ztp_boot
+set base-url https://20260708azurerhelztp.blob.core.windows.net/public
+
+echo === Initializing RHEL Zero-Touch Provisioning via iPXE ===
+echo Fetching kernel and initramfs from Azure Blob Storage...
+
+kernel ${base-url}/vmlinuz inst.repo=${base-url} inst.ks=${base-url}/ks.cfg ip=dhcp.
+initrd ${base-url}/initrd.img
+
+echo Executing EFI Handoff...
+boot || goto failed
+
+:failed
+echo
+echo Handoff failed! Dropping to shell for debugging...
+shell
+
+#!ipxe
+
+echo =========================================
+echo Initiating Zero-Touch Provisioning...
+echo =========================================
+
+set blob_base_url https://20260708azurerhelztp.blob.core.windows.net/public
+
+echo === Initializing RHEL Zero-Touch Provisioning via iPXE ===
+echo Fetching kernel and initramfs from Azure Blob Storage...
+
+kernel ${blob_base_url}/vmlinuz inst.repo=${blob_base_url}/repo inst.ks=${blob_base_url}/kickstart.ks quiet
+initrd ${blob_base_url}/initrd.img
+
+echo Booting RHEL kernel...
+boot

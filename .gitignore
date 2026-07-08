@@ -1,0 +1,10 @@
+bin/
+obj/
+.vscode/
+local.settings.json
+.python_packages/
+__pycache__/
+.env
+venv/
+.venv/
+*.pyc
