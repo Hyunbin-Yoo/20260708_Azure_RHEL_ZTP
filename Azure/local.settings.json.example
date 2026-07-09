@@ -5,6 +5,12 @@
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "RHEL_IB_API_URL": "https://console.redhat.com/api/image-builder/v1",
     "RH_API_TOKEN": "your_redhat_offline_token_here",
-    "RHEL_BLUEPRINT_ID": "20260708_Azure_RHEL_ZTP_UUID"
+    "RHEL_BLUEPRINT_ID": "20260708_Azure_RHEL_ZTP_UUID",
+    "IB_STORAGE_ACCOUNT_NAME": "ibxxxxxxxxxxxxxxxxxxxx",
+    "SMTP_SERVER": "smtp.outlook.com",
+    "SMTP_PORT": "587",
+    "SMTP_USER": "alert-sender@outlook.com",
+    "SMTP_PASS": "your_app_password",
+    "NOTIFICATION_EMAIL": "sre-team@outlook.com"
   }
 }
