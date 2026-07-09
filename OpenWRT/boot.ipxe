@@ -7,16 +7,19 @@ echo =========================================
 prompt --key 0x02 --timeout 3000 Press Ctrl-B for the iPXE command line... || goto ztp_boot
 
 :ztp_boot
-set blob_base_url https://20260708azurerhelztp.blob.core.windows.net/public
-set target_image latest_rhel_ztp.vhd
+set base_url http://192.168.1.1/ztp/mnt
+set ks_url http://192.168.1.1/ztp/ztp.ks
 
 echo === Initializing RHEL Zero-Touch Provisioning via iPXE ===
-echo Fetching latest immutable golden image from Azure Blob Storage...
+echo Loading vmlinuz kernel and initrd into memory...
 
-echo Executing SAN Boot from target VHD...
-sanboot ${blob_base_url}/${target_image} || goto failed
+kernel ${base_url}/images/pxeboot/vmlinuz inst.stage2=${base_url} inst.ks=${ks_url} quiet
+initrd ${base_url}/images/pxeboot/initrd.img
+
+echo Booting native kernel with override Kickstart...
+boot || goto failed
 
 :failed
 echo
-echo SAN Boot handoff failed! Dropping to shell for debugging...
+echo Kernel handoff failed! Dropping to shell for debugging...
 shell

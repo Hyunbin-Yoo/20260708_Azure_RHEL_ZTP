@@ -1,0 +1,23 @@
+# Aggressively saturate the 800 Mb/s WAN pipe
+    aria2c -x 16 -s 16 "$AZURE_URL" -d "$LOCAL_DIR" -o "$TMP_FILE"
+    
+    if [ $? -eq 0 ]; then
+        mv "$LOCAL_DIR/$TMP_FILE" "$LOCAL_DIR/$FINAL_FILE"
+        logger "ZTP Startup: Image successfully cached to local edge storage!"
+        
+        # --- NEW: Expose the ISO contents to the web server ---
+        mkdir -p "$LOCAL_DIR/mnt"
+        umount "$LOCAL_DIR/mnt" 2>/dev/null  # Clear any old mounts
+        mount -o loop,ro "$LOCAL_DIR/$FINAL_FILE" "$LOCAL_DIR/mnt"
+        logger "ZTP Startup: ISO loop-mounted. Files are ready for iPXE stream."
+        # ------------------------------------------------------
+    else
+        logger "ZTP Startup: Fetch failed. Checking if fallback cache exists..."
+        rm -f "$LOCAL_DIR/$TMP_FILE"
+        
+        # Attempt to mount a previously cached ISO if the download failed
+        if [ -f "$LOCAL_DIR/$FINAL_FILE" ]; then
+            mkdir -p "$LOCAL_DIR/mnt"
+            mount -o loop,ro "$LOCAL_DIR/$FINAL_FILE" "$LOCAL_DIR/mnt"
+        fi
+    fi

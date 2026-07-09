@@ -1,205 +1,142 @@
-import logging
 import os
+import logging
 import time
 import requests
 import smtplib
 from email.message import EmailMessage
-from datetime import datetime, timezone, timedelta
 import azure.functions as func
-from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions, UserDelegationKey
+from azure.storage.blob import BlobServiceClient
 
 app = func.FunctionApp()
 
-# --- Configuration ---
-RH_IB_API_URL = os.environ.get("RHEL_IB_API_URL", "https://console.redhat.com/api/image-builder/v1")
-RH_API_TOKEN = os.environ.get("RH_API_TOKEN")
-BLUEPRINT_ID = os.environ.get("RHEL_BLUEPRINT_ID")
-RESOURCE_GROUP = "20260708_Azure_RHEL_ZTP"
+# Configuration Constants
+CONTAINER_NAME = "ztp-container"
+FINAL_BLOB_NAME = "rhel-image.iso"
+TEMP_BLOB_NAME = "rhel-image.tmp"
+MAX_TRIES = 3
+DELAY_BETWEEN_TRIES = 300  # 5 minutes
+POLL_INTERVAL = 60         # Poll Red Hat API every 60 seconds
 
-MAIN_STORAGE_ACCOUNT = "20260708azurerhelztp"
-MAIN_CONTAINER = "public"
-TARGET_BLOB_NAME = "latest_rhel_ztp.vhd"
-
-STAGING_STORAGE_ACCOUNT = os.environ.get("IB_STORAGE_ACCOUNT_NAME") 
-
-# SMTP Configuration
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
-SMTP_USER = os.environ.get("SMTP_USER")
-SMTP_PASS = os.environ.get("SMTP_PASS")
-NOTIFICATION_EMAIL = os.environ.get("NOTIFICATION_EMAIL")
-
-def send_email(subject: str, body: str):
-    """Sends an email notification."""
-    if not all([SMTP_USER, SMTP_PASS, NOTIFICATION_EMAIL]):
-        logging.warning("SMTP credentials missing. Skipping email notification.")
-        return
-    
+def send_alert_email(error_details: str):
+    """Fires a critical alert email via SMTP if the pipeline permanently fails."""
     try:
         msg = EmailMessage()
-        msg.set_content(body)
-        msg['Subject'] = subject
-        msg['From'] = SMTP_USER
-        msg['To'] = NOTIFICATION_EMAIL
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        logging.info(f"Email sent: {subject}")
+        msg.set_content(f"The RHEL ZTP pipeline failed after {MAX_TRIES} attempts.\n\nFinal Error:\n{error_details}")
+        msg['Subject'] = 'CRITICAL: ZTP Pipeline Build Failure'
+        msg['From'] = os.environ["SMTP_USER"]
+        msg['To'] = os.environ["NOTIFICATION_EMAIL"]
+        
+        server = smtplib.SMTP(os.environ["SMTP_SERVER"], int(os.environ["SMTP_PORT"]))
+        server.starttls()
+        server.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
+        server.send_message(msg)
+        server.quit()
+        logging.info("Critical failure email alert dispatched.")
     except Exception as e:
-        logging.error(f"Failed to send email: {e}")
+        logging.error(f"Failed to dispatch SMTP alert: {str(e)}")
 
-def get_user_delegation_sas(blob_service_client: BlobServiceClient, container_name: str, blob_name: str) -> str:
-    """Generates a short-lived User Delegation SAS token for server-side copying."""
-    start_time = datetime.now(timezone.utc) - timedelta(minutes=5)
-    expiry_time = start_time + timedelta(hours=1)
-
-    user_delegation_key = blob_service_client.get_user_delegation_key(start_time, expiry_time)
+@app.schedule(schedule="0 0 * * *", arg_name="timer", run_on_startup=False)
+def cron_ztp_build_cycle(timer: func.TimerRequest) -> None:
+    logging.info("Starting daily RHEL ZTP build cycle orchestration.")
     
-    sas_token = generate_blob_sas(
-        account_name=blob_service_client.account_name,
-        container_name=container_name,
-        blob_name=blob_name,
-        user_delegation_key=user_delegation_key,
-        permission=BlobSasPermissions(read=True),
-        expiry=expiry_time,
-        start=start_time
-    )
-    return f"https://{blob_service_client.account_name}.blob.core.windows.net/{container_name}/{blob_name}?{sas_token}"
-
-# --- Trigger 1: The 1-Hour Orchestrator ---
-@app.timer_trigger(schedule="0 0 * * * *", arg_name="timer", run_on_startup=False, use_monitor=True)
-def rhel_ztp_composer_timer(timer: func.TimerRequest) -> None:
-    logging.info("RHEL ZTP 1-hour compose cycle initiated.")
-    send_email("ZTP Pipeline: Build Started", "The 1-hour RHEL ZTP build cycle has been triggered.")
+    # Initialize Azure Storage Client
+    connection_string = os.environ["AzureWebJobsStorage"]
+    blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+    container_client = blob_service_client.get_container_client(CONTAINER_NAME)
+    
+    # Fetch API Tokens and Config from App Settings
+    rh_api_token = os.environ["RH_API_TOKEN"]
+    blueprint_id = os.environ["RHEL_BLUEPRINT_ID"]
+    api_base_url = os.environ["RHEL_IB_API_URL"]
     
     headers = {
-        "Authorization": f"Bearer {RH_API_TOKEN}",
+        "Authorization": f"Bearer {rh_api_token}",
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "blueprint_id": BLUEPRINT_ID,
-        "image_requests": [{
-            "architecture": "x86_64",
-            "image_type": "azure",
-            "upload_request": {
-                "type": "azure",
-                "options": {
-                    "tenant_id": os.environ.get("AZURE_TENANT_ID"),
-                    "subscription_id": os.environ.get("AZURE_SUBSCRIPTION_ID"),
-                    "resource_group": RESOURCE_GROUP,
-                    "storage_account": STAGING_STORAGE_ACCOUNT,
-                    "hyper_v_generation": "V2"
-                }
+    # Execute the 3-Try Build Loop
+    success = False
+    last_error = ""
+    
+    for attempt in range(1, MAX_TRIES + 1):
+        try:
+            logging.info(f"Attempt {attempt}/{MAX_TRIES}: Triggering Red Hat Compose...")
+            
+            # 1. POST Request to start the build
+            compose_url = f"{api_base_url}/composes"
+            compose_payload = {
+                "blueprint_id": blueprint_id,
+                "image_requests": [{
+                    "architecture": "x86_64",
+                    "image_type": "image-installer"
+                }]
             }
-        }]
-    }
-
-    max_build_attempts = 3
-    build_success = False
-    compose_id = ""
-    target_blob_source = ""
-
-    for attempt in range(1, max_build_attempts + 1):
-        logging.info(f"Initiating RHEL build attempt {attempt}/{max_build_attempts}...")
-        response = requests.post(f"{RH_IB_API_URL}/composes", json=payload, headers=headers)
-        
-        if response.status_code not in [200, 201]:
-            logging.error(f"Compose POST failed: {response.text}")
-            time.sleep(60)
-            continue
             
-        compose_data = response.json()
-        compose_id = compose_data.get("id")
-        
-        max_polls = 60
-        poll_delay = 30
-        
-        for _ in range(max_polls):
-            time.sleep(poll_delay)
-            status_res = requests.get(f"{RH_IB_API_URL}/composes/{compose_id}", headers=headers)
-            
-            if status_res.status_code == 200:
+            trigger_res = requests.post(compose_url, json=compose_payload, headers=headers, timeout=30)
+            trigger_res.raise_for_status()
+            compose_id = trigger_res.json()["id"]
+            logging.info(f"Compose triggered successfully. ID: {compose_id}. Starting status polling...")
+
+            # 2. Poll the Compose ID until completion
+            status_url = f"{compose_url}/{compose_id}"
+            while True:
+                status_res = requests.get(status_url, headers=headers, timeout=30)
+                status_res.raise_for_status()
                 status_data = status_res.json()
-                status = status_data.get("image_status", {}).get("status")
                 
-                logging.info(f"Compose {compose_id} status: {status}")
+                image_status = status_data.get("image_status", {}).get("status")
+                logging.info(f"Current Image Builder status for {compose_id}: {image_status}")
                 
-                if status == "success":
-                    build_success = True
-                    target_blob_source = status_data.get("image_status", {}).get("upload_status", {}).get("options", {}).get("image_name")
+                if image_status == "success":
+                    s3_source_url = status_data["image_status"]["upload_status"]["options"]["url"]
                     break
-                elif status in ["failed", "cancelled"]:
-                    logging.warning(f"Build failed on attempt {attempt}.")
-                    break
-                    
-        if build_success:
-            break
+                elif image_status in ["failure", "error"]:
+                    raise Exception("Red Hat Image Builder failed to compile the ISO.")
+                
+                time.sleep(POLL_INTERVAL)
 
-    if not build_success:
-        msg = f"ZTP Pipeline aborted. RHEL Image Builder failed {max_build_attempts} consecutive times."
-        logging.error(msg)
-        send_email("ZTP Pipeline: Build FATAL ERROR", msg)
-        return
-
-    # --- Phase 2: Copy to Production Storage ---
-    logging.info(f"Build {compose_id} successful. Promoting artifact {target_blob_source} to production...")
-    
-    try:
-        credential = DefaultAzureCredential()
-        
-        staging_url = f"https://{STAGING_STORAGE_ACCOUNT}.blob.core.windows.net"
-        staging_client = BlobServiceClient(account_url=staging_url, credential=credential)
-        
-        staging_containers = list(staging_client.list_containers())
-        if not staging_containers:
-            raise Exception("No containers found in the staging account.")
-        staging_container_name = staging_containers[0].name
-        
-        source_sas_url = get_user_delegation_sas(staging_client, staging_container_name, f"{target_blob_source}.vhd")
-        
-        main_url = f"https://{MAIN_STORAGE_ACCOUNT}.blob.core.windows.net"
-        main_client = BlobServiceClient(account_url=main_url, credential=credential)
-        dest_blob_client = main_client.get_blob_client(container=MAIN_CONTAINER, blob=TARGET_BLOB_NAME)
-        
-        dest_blob_client.start_copy_from_url(source_sas_url)
-        
-        msg = f"ZTP Pipeline complete. Image {compose_id} is successfully promoted to {MAIN_CONTAINER}/{TARGET_BLOB_NAME}."
-        logging.info(msg)
-        send_email("ZTP Pipeline: Deployment Success", msg)
-        
-    except Exception as e:
-        msg = f"ZTP Pipeline failed during storage promotion: {e}"
-        logging.error(msg)
-        send_email("ZTP Pipeline: Promotion ERROR", msg)
-
-# --- Trigger 2: The 24-Hour Garbage Collector ---
-@app.timer_trigger(schedule="0 0 */6 * * *", arg_name="timer", run_on_startup=False, use_monitor=True)
-def rhel_ztp_cleaner_timer(timer: func.TimerRequest) -> None:
-    logging.info("RHEL ZTP 24-hour staging cleanup initiated.")
-    
-    try:
-        credential = DefaultAzureCredential()
-        staging_url = f"https://{STAGING_STORAGE_ACCOUNT}.blob.core.windows.net"
-        staging_client = BlobServiceClient(account_url=staging_url, credential=credential)
-        
-        deleted_count = 0
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=6)
-        
-        for container in staging_client.list_containers():
-            container_client = staging_client.get_container_client(container.name)
+            # 3. Stream from S3 directly to Azure Temp Blob
+            logging.info("S3 URL acquired. Streaming ISO to Azure staging layer...")
+            with requests.get(s3_source_url, stream=True, timeout=900) as response:
+                response.raise_for_status()
+                
+                temp_blob_client = container_client.get_blob_client(TEMP_BLOB_NAME)
+                temp_blob_client.upload_blob(response.raw, overwrite=True)
             
-            for blob in container_client.list_blobs():
-                if blob.last_modified < cutoff_time:
-                    container_client.delete_blob(blob.name)
-                    deleted_count += 1
-                    logging.info(f"Purged stale staging image: {blob.name}")
-                    
-        send_email("ZTP Pipeline: Cleanup Complete", f"Successfully purged {deleted_count} stale images from staging account {STAGING_STORAGE_ACCOUNT}.")
+            logging.info(f"Attempt {attempt} completed successfully. Data payload committed.")
+            success = True
+            break
+            
+        except Exception as e:
+            last_error = str(e)
+            logging.error(f"Attempt {attempt} failed with error: {last_error}")
+            if attempt < MAX_TRIES:
+                logging.info(f"Waiting {DELAY_BETWEEN_TRIES} seconds before next try...")
+                time.sleep(DELAY_BETWEEN_TRIES)
+            else:
+                logging.critical("All 3 build tries exhausted. Abandoning cycle for today.")
+                send_alert_email(last_error)
+                return
+
+    # 4. Asynchronous Client Polling & Atomic Swap
+    if success:
+        logging.info("Executing atomic swap to update the fixed production URL.")
+        production_blob_client = container_client.get_blob_client(FINAL_BLOB_NAME)
+        temp_blob_client = container_client.get_blob_client(TEMP_BLOB_NAME)
         
-    except Exception as e:
-        logging.error(f"Failed to execute cleanup: {e}")
-        send_email("ZTP Pipeline: Cleanup ERROR", f"The 24-hour garbage collector failed: {e}")
+        production_blob_client.start_copy_from_url(temp_blob_client.url)
+        
+        props = production_blob_client.get_blob_properties()
+        while props.copy.status == "pending":
+            logging.info("Atomic swap copy pending... waiting 2 seconds.")
+            time.sleep(2)
+            props = production_blob_client.get_blob_properties()
+            
+        if props.copy.status == "success":
+            logging.info("Copy verified. Executing automated cleanup of staging asset.")
+            temp_blob_client.delete_blob()
+            logging.info("Daily ZTP ISO rotation complete. Pipeline is stable.")
+        else:
+            msg = f"Atomic swap copy failed with internal status: {props.copy.status}"
+            logging.error(msg)
+            send_alert_email(msg)
