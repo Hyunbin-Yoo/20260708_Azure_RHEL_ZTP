@@ -35,7 +35,7 @@ def send_alert_email(error_details: str):
     except Exception as e:
         logging.error(f"Failed to dispatch SMTP alert: {str(e)}")
 
-@app.schedule(schedule="0 0 * * *", arg_name="timer", run_on_startup=False)
+@app.timer_trigger(schedule="0 0 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def cron_ztp_build_cycle(timer: func.TimerRequest) -> None:
     logging.info("Starting daily RHEL ZTP build cycle orchestration.")
     
