@@ -1,0 +1,3 @@
+# Force LF line endings for all shell scripts and OpenWrt configs
+OpenWRT/rc.local text eol=lf
+*.sh text eol=lf
