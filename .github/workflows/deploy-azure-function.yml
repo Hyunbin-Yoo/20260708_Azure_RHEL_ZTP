@@ -24,8 +24,7 @@ jobs:
       - name: Install Dependencies
         run: |
           cd ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          python -m venv .venv
-          source .venv/bin/activate
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Login to Azure
@@ -33,9 +32,17 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Ensure Function App is Started
+        run: |
+          az functionapp start --name 'rhel-ztp-composer-app' --resource-group '20260708_Azure_RHEL_ZTP'
+          echo "Waiting 30 seconds for the host and storage to mount..."
+          sleep 30
+
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
           app-name: 'rhel-ztp-composer-app'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           publish-profile: ${{ secrets.AZURE_FUNC_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
