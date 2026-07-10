@@ -7,8 +7,8 @@ echo =========================================
 prompt --key 0x02 --timeout 3000 Press Ctrl-B for the iPXE command line... || goto ztp_boot
 
 :ztp_boot
-set base_url http://192.168.1.1/ztp/mnt
-set ks_url http://192.168.1.1/ztp/ztp.ks
+set base_url http://192.168.1.1/mounted-iso
+set ks_url http://192.168.1.1/ks.cfg
 
 echo === Initializing RHEL Zero-Touch Provisioning via iPXE ===
 echo Loading vmlinuz kernel and initrd into memory...

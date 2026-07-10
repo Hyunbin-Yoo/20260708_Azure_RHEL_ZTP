@@ -1,23 +1,58 @@
-# Aggressively saturate the 800 Mb/s WAN pipe
-    aria2c -x 16 -s 16 "$AZURE_URL" -d "$LOCAL_DIR" -o "$TMP_FILE"
-    
-    if [ $? -eq 0 ]; then
-        mv "$LOCAL_DIR/$TMP_FILE" "$LOCAL_DIR/$FINAL_FILE"
-        logger "ZTP Startup: Image successfully cached to local edge storage!"
-        
-        # --- NEW: Expose the ISO contents to the web server ---
-        mkdir -p "$LOCAL_DIR/mnt"
-        umount "$LOCAL_DIR/mnt" 2>/dev/null  # Clear any old mounts
-        mount -o loop,ro "$LOCAL_DIR/$FINAL_FILE" "$LOCAL_DIR/mnt"
-        logger "ZTP Startup: ISO loop-mounted. Files are ready for iPXE stream."
-        # ------------------------------------------------------
-    else
-        logger "ZTP Startup: Fetch failed. Checking if fallback cache exists..."
-        rm -f "$LOCAL_DIR/$TMP_FILE"
-        
-        # Attempt to mount a previously cached ISO if the download failed
-        if [ -f "$LOCAL_DIR/$FINAL_FILE" ]; then
-            mkdir -p "$LOCAL_DIR/mnt"
-            mount -o loop,ro "$LOCAL_DIR/$FINAL_FILE" "$LOCAL_DIR/mnt"
-        fi
-    fi
+#!/bin/sh
+
+# Wait for the raw USB drive to appear (sda)
+while [ ! -b /dev/sda ]; do
+    logger "ZTP-BOOT: Waiting for USB drive /dev/sda..."
+    sleep 2
+done
+
+# If sda1 doesn't exist yet, create a single partition
+if [ ! -b /dev/sda1 ]; then
+    logger "ZTP-BOOT: Partitioning /dev/sda..."
+    parted -s /dev/sda mklabel msdos mkpart primary ext4 1MiB 100%
+    sleep 2
+fi
+
+# Format and mount the USB drive
+logger "ZTP-BOOT: Formatting /dev/sda1 to ext4..."
+mkfs.ext4 -F /dev/sda1
+mkdir -p /mnt/usb
+mount -t ext4 /dev/sda1 /mnt/usb
+
+# Wait for WAN connectivity
+while ! ping -c 1 8.8.8.8 >/dev/null 2>&1; do
+    logger "ZTP-BOOT: Waiting for internet connection..."
+    sleep 2
+done
+logger "ZTP-BOOT: Internet confirmed. Starting downloads."
+
+# Create file structure
+mkdir -p /mnt/usb/tftpboot
+mkdir -p /mnt/usb/mounted-iso
+
+# Fetch iPXE binaries
+logger "ZTP-BOOT: Fetching iPXE bootloaders..."
+wget -O /mnt/usb/tftpboot/undionly.kpxe "http://boot.ipxe.org/undionly.kpxe"
+wget -O /mnt/usb/tftpboot/ipxe.efi "http://boot.ipxe.org/ipxe.efi"
+
+# Fetch RHEL 10 ISO
+logger "ZTP-BOOT: Fetching RHEL ISO via aria2..."
+aria2c -x 4 -s 4 -d /mnt/usb -o rhel10.iso "https://image-builder-service-production-2.s3.us-east-1.amazonaws.com/rhel10.iso"
+
+# Mount the ISO
+logger "ZTP-BOOT: Loop-mounting ISO..."
+mount -o loop /mnt/usb/rhel10.iso /mnt/usb/mounted-iso
+
+# Fetch plaintext boot.ipxe and Kickstart from repository
+logger "ZTP-BOOT: Fetching boot.ipxe and ks.cfg from repository..."
+wget -O /mnt/usb/boot.ipxe "https://raw.githubusercontent.com/YourOrg/YourRepo/main/boot.ipxe"
+wget -O /mnt/usb/ks.cfg "https://raw.githubusercontent.com/YourOrg/YourRepo/main/ks.cfg"
+
+# Restart dependent services to bind to the new USB environment
+logger "ZTP-BOOT: Restarting uhttpd and dnsmasq..."
+/etc/init.d/uhttpd restart
+/etc/init.d/dnsmasq restart
+
+logger "ZTP-BOOT: Router is armed and ready."
+exit 0
+EOF
