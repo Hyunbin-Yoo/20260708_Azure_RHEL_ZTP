@@ -8,7 +8,7 @@ prompt --key 0x02 --timeout 3000 Press Ctrl-B for the iPXE command line... || go
 
 :ztp_boot
 set kernel_url http://192.168.1.1/rhel-boot
-set stage2_url http://192.168.1.1/mounted-iso
+set stage2_url http://192.168.1.1/mounted-iso/images/install.img
 set ks_url http://192.168.1.1/ks.cfg
 
 echo === Initializing RHEL Zero-Touch Provisioning via iPXE ===
