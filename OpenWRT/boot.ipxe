@@ -8,13 +8,13 @@ prompt --key 0x02 --timeout 3000 Press Ctrl-B for the iPXE command line... || go
 
 :ztp_boot
 set kernel_url http://192.168.1.1/rhel-boot
-set stage2_url http://192.168.1.1/mounted-iso/images/install.img
+set stage2_url http://192.168.1.1/mounted-iso
 set ks_url http://192.168.1.1/ks.cfg
 
 echo === Initializing RHEL Zero-Touch Provisioning via iPXE ===
 echo Loading vmlinuz kernel and initrd into memory...
 
-kernel ${kernel_url}/vmlinuz inst.stage2=${stage2_url} inst.ks=${ks_url} quiet
+kernel ${kernel_url}/vmlinuz ip=dhcp inst.stage2=${stage2_url} inst.ks=${ks_url} quiet
 initrd ${kernel_url}/initrd.img
 
 echo Booting native kernel with override Kickstart...
