@@ -1,58 +1,113 @@
 #!/bin/sh
 
-# Wait for the raw USB drive to appear (sda)
+# 1. Wait for WAN connectivity (Required for opkg and downloads)
+while ! ping -c 1 8.8.8.8 >/dev/null 2>&1; do
+    logger "ZTP-BOOT: Waiting for internet connection..."
+    sleep 2
+done
+logger "ZTP-BOOT: Internet confirmed. Beginning ZTP pipeline."
+
+# 2. Install required packages idempotently
+logger "ZTP-BOOT: Updating opkg and installing dependencies..."
+opkg update
+opkg install kmod-usb-storage block-mount kmod-fs-ext4 e2fsprogs fdisk kmod-loop aria2 uhttpd parted dropbearconvert openssh-sftp-server kmod-fs-isofs
+
+# 3. Configure uhttpd and dnsmasq via UCI
+logger "ZTP-BOOT: Applying UCI configurations..."
+uci set uhttpd.main.home='/mnt/usb'
+uci set uhttpd.main.no_symlinks='0'
+uci commit uhttpd
+
+uci set dhcp.ipxe_tag='userclass'
+uci set dhcp.ipxe_tag.userclass='iPXE'
+uci set dhcp.ipxe_tag.networkid='ipxe'
+
+uci set dhcp.pxe='boot'
+uci set dhcp.pxe.networkid='!ipxe'
+uci set dhcp.pxe.filename='ipxe.efi'
+uci set dhcp.pxe.servername='openwrt'
+uci set dhcp.pxe.serveraddress='192.168.1.1'
+
+uci set dhcp.ipxe='boot'
+uci set dhcp.ipxe.networkid='ipxe'
+uci set dhcp.ipxe.filename='http://192.168.1.1/boot.ipxe'
+uci set dhcp.ipxe.servername='openwrt'
+uci set dhcp.ipxe.serveraddress='192.168.1.1'
+uci commit dhcp
+
+# 4. Wait for the raw USB drive to appear (sda)
 while [ ! -b /dev/sda ]; do
     logger "ZTP-BOOT: Waiting for USB drive /dev/sda..."
     sleep 2
 done
 
-# If sda1 doesn't exist yet, create a single partition
+# 5. Partition and Format ONLY if sda1 doesn't exist
 if [ ! -b /dev/sda1 ]; then
-    logger "ZTP-BOOT: Partitioning /dev/sda..."
+    logger "ZTP-BOOT: Partitioning and formatting /dev/sda..."
     parted -s /dev/sda mklabel msdos mkpart primary ext4 1MiB 100%
     sleep 2
+    mkfs.ext4 -F /dev/sda1
 fi
 
-# Format and mount the USB drive
-logger "ZTP-BOOT: Formatting /dev/sda1 to ext4..."
-mkfs.ext4 -F /dev/sda1
+# 6. Mount the USB drive safely
 mkdir -p /mnt/usb
-mount -t ext4 /dev/sda1 /mnt/usb
+if ! mountpoint -q /mnt/usb; then
+    logger "ZTP-BOOT: Mounting /dev/sda1 to /mnt/usb..."
+    mount -t ext4 /dev/sda1 /mnt/usb
+fi
 
-# Wait for WAN connectivity
-while ! ping -c 1 8.8.8.8 >/dev/null 2>&1; do
-    logger "ZTP-BOOT: Waiting for internet connection..."
-    sleep 2
-done
-logger "ZTP-BOOT: Internet confirmed. Starting downloads."
-
-# Create file structure
+# 7. Create file structure
 mkdir -p /mnt/usb/tftpboot
 mkdir -p /mnt/usb/mounted-iso
+mkdir -p /mnt/usb/rhel-boot
 
-# Fetch iPXE binaries
-logger "ZTP-BOOT: Fetching iPXE bootloaders..."
-wget -O /mnt/usb/tftpboot/undionly.kpxe "http://boot.ipxe.org/undionly.kpxe"
-wget -O /mnt/usb/tftpboot/ipxe.efi "http://boot.ipxe.org/ipxe.efi"
+# 8. Fetch iPXE binaries (Skip if already downloaded)
+if [ ! -f /mnt/usb/tftpboot/ipxe.efi ]; then
+    logger "ZTP-BOOT: Fetching iPXE bootloaders..."
+    wget -U "Mozilla/5.0" -O /mnt/usb/tftpboot/undionly.kpxe "http://boot.ipxe.org/undionly.kpxe"
+    wget -U "Mozilla/5.0" -O /mnt/usb/tftpboot/ipxe.efi "http://boot.ipxe.org/x86_64-efi/ipxe.efi"
+fi
 
-# Fetch RHEL 10 ISO
-logger "ZTP-BOOT: Fetching RHEL ISO via aria2..."
-aria2c -x 4 -s 4 -d /mnt/usb -o rhel10.iso "https://image-builder-service-production-2.s3.us-east-1.amazonaws.com/rhel10.iso"
+# 9. Fetch RHEL 10 ISO (Skip if already downloaded)
+if [ ! -f /mnt/usb/rhel10.iso ]; then
+    logger "ZTP-BOOT: Fetching RHEL ISO via aria2..."
+    aria2c -x 16 -s 16 -k 1M -d /mnt/usb -o rhel10.iso "https://image-builder-service-production-2.s3.us-east-1.amazonaws.com/composer-api-a8474e09-a4d2-4fd2-8f3f-6e45690822ca-installer.iso?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Checksum-Mode=ENABLED&X-Amz-Credential=AKIAWX4I7AK37LRHGPK5%2F20260709%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260709T070604Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&x-id=GetObject&X-Amz-Signature=c3417a9e9da2426ed0660378a730d1892058f2a017631ea494a15076158ed401"
+fi
 
-# Mount the ISO
-logger "ZTP-BOOT: Loop-mounting ISO..."
-mount -o loop /mnt/usb/rhel10.iso /mnt/usb/mounted-iso
+# 10. Mount the ISO safely
+if ! mountpoint -q /mnt/usb/mounted-iso; then
+    logger "ZTP-BOOT: Loop-mounting ISO..."
+    mount -t iso9660 -o loop /mnt/usb/rhel10.iso /mnt/usb/mounted-iso
+fi
 
-# Fetch plaintext boot.ipxe and Kickstart from repository
+# 11. Extract boot assets and fix strict root permissions
+logger "ZTP-BOOT: Staging readable boot assets..."
+cp /mnt/usb/mounted-iso/images/pxeboot/vmlinuz /mnt/usb/rhel-boot/
+cp /mnt/usb/mounted-iso/images/pxeboot/initrd.img /mnt/usb/rhel-boot/
+chmod 644 /mnt/usb/rhel-boot/*
+
+# 12. Symlink the remaining ISO payload into the staging folder for inst.stage2
+logger "ZTP-BOOT: Symlinking ISO payload for inst.stage2..."
+for item in /mnt/usb/mounted-iso/*; do
+    ln -sfn "$item" /mnt/usb/rhel-boot/
+done
+ln -sfn /mnt/usb/mounted-iso/.treeinfo /mnt/usb/rhel-boot/.treeinfo 2>/dev/null
+
+# 13. Fetch plaintext boot.ipxe and Kickstart from repository
 logger "ZTP-BOOT: Fetching boot.ipxe and ks.cfg from repository..."
-wget -O /mnt/usb/boot.ipxe "https://raw.githubusercontent.com/YourOrg/YourRepo/main/boot.ipxe"
-wget -O /mnt/usb/ks.cfg "https://raw.githubusercontent.com/YourOrg/YourRepo/main/ks.cfg"
+wget -U "Mozilla/5.0" -O /mnt/usb/boot.ipxe "https://raw.githubusercontent.com/Hyunbin-Yoo/20260708_Azure_RHEL_ZTP/refs/heads/main/OpenWRT/boot.ipxe"
+wget -U "Mozilla/5.0" -O /mnt/usb/ks.cfg "https://raw.githubusercontent.com/Hyunbin-Yoo/20260708_Azure_RHEL_ZTP/refs/heads/main/OpenWRT/ks.cfg"
 
-# Restart dependent services to bind to the new USB environment
+# 14. Enforce web server paths (Bridging files into /www)
+logger "ZTP-BOOT: Configuring uhttpd paths..."
+ln -sfn /mnt/usb/rhel-boot /www/rhel-boot
+ln -sfn /mnt/usb/boot.ipxe /www/boot.ipxe
+ln -sfn /mnt/usb/ks.cfg /www/ks.cfg
+
+# 15. Restart dependent services to bind to the new USB environment
 logger "ZTP-BOOT: Restarting uhttpd and dnsmasq..."
 /etc/init.d/uhttpd restart
 /etc/init.d/dnsmasq restart
 
 logger "ZTP-BOOT: Router is armed and ready."
 exit 0
-EOF
