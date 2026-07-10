@@ -55,21 +55,17 @@ else
     logger "ZTP-BOOT: Partition /dev/sda1 already exists, skipping format."
 fi
 
-# 6. Mount USB storage if not already mounted
-if ! grep -q '/mnt/usb ' /proc/mounts; then
-    logger "ZTP-BOOT: Mounting /dev/sda1 to /mnt/usb..."
-    mkdir -p /mnt/usb
-    mount -t ext4 /dev/sda1 /mnt/usb
-else
-    logger "ZTP-BOOT: /mnt/usb is already mounted."
-fi
+# 6. CRITICAL: Mount USB storage FIRST before any directory or file operations
+logger "ZTP-BOOT: Mounting /dev/sda1 to /mnt/usb..."
+mkdir -p /mnt/usb
+mount -t ext4 /dev/sda1 /mnt/usb
 
-# 7. Create file structure
+# 7. Now safely create file structure on the mounted partition
 mkdir -p /mnt/usb/tftpboot
 mkdir -p /mnt/usb/mounted-iso
 mkdir -p /mnt/usb/rhel-boot
 
-# 8. Fetch iPXE binaries if missing
+# 8. Fetch iPXE binaries if missing (guaranteed to check the real USB)
 if [ ! -f /mnt/usb/tftpboot/ipxe.efi ]; then
     logger "ZTP-BOOT: Fetching iPXE bootloaders..."
     wget -U "Mozilla/5.0" -O /mnt/usb/tftpboot/undionly.kpxe "http://boot.ipxe.org/undionly.kpxe"
