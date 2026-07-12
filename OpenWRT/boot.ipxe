@@ -14,7 +14,7 @@ set ks_url http://192.168.1.1/ks.cfg
 echo === Initializing RHEL Zero-Touch Provisioning via iPXE ===
 echo Loading vmlinuz kernel and initrd into memory...
 
-kernel ${kernel_url}/vmlinuz ip=dhcp inst.stage2=${stage2_url} inst.ks=${ks_url} quiet
+kernel ${kernel_url}/vmlinuz ip=dhcp rd.neednet=1 rd.net.timeout.carrier=15 inst.stage2=${stage2_url} inst.ks=${ks_url} quiet
 initrd ${kernel_url}/initrd.img
 
 echo Booting native kernel with override Kickstart...

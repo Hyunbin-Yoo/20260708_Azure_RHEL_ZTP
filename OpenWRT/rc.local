@@ -97,9 +97,11 @@ cp /mnt/usb/mounted-iso/images/pxeboot/initrd.img /mnt/usb/rhel-boot/
 chmod 644 /mnt/usb/rhel-boot/*
 
 # 12. Fetch plaintext boot.ipxe and Kickstart from repository
-logger "ZTP-BOOT: Fetching boot.ipxe and ks.cfg from repository..."
+logger "ZTP-BOOT: Fetching boot.ipxe, autoexec.ipxe, and ks.cfg from repository..."
 wget -U "Mozilla/5.0" -O /mnt/usb/boot.ipxe "https://raw.githubusercontent.com/Hyunbin-Yoo/20260708_Azure_RHEL_ZTP/refs/heads/main/OpenWRT/boot.ipxe"
+wget -U "Mozilla/5.0" -O /mnt/usb/tftpboot/autoexec.ipxe "https://raw.githubusercontent.com/Hyunbin-Yoo/20260708_Azure_RHEL_ZTP/refs/heads/main/OpenWRT/autoexec.ipxe"
 wget -U "Mozilla/5.0" -O /mnt/usb/ks.cfg "https://raw.githubusercontent.com/Hyunbin-Yoo/20260708_Azure_RHEL_ZTP/refs/heads/main/OpenWRT/ks.cfg"
+
 
 # 13. Enforce web server paths
 logger "ZTP-BOOT: Configuring uhttpd paths..."
